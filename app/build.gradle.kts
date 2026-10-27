@@ -4,15 +4,30 @@ plugins {
 }
 
 android {
-    namespace = "com.example.phonecast"
+    namespace = "com.k1epic.phonecast"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.example.phonecast"
+        applicationId = "com.k1epic.phonecast"
         minSdk = 26
-        targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        // Android 12-friendly target for this first prototype.
+        targetSdk = 32
+        versionCode = 2
+        versionName = "0.1.1"
+    }
+
+    signingConfigs {
+        getByName("debug") {
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
+        }
+    }
+
+    buildTypes {
+        getByName("debug") {
+            signingConfig = signingConfigs.getByName("debug")
+        }
     }
 
     compileOptions {
