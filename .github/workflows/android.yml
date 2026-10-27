@@ -19,10 +19,12 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-      - name: Install Android platform
-        run: |
-          yes | sdkmanager --licenses
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 12266719
+          accept-android-sdk-licenses: true
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
       - name: Build debug APK
         run: gradle --no-daemon assembleDebug
       - name: Upload APK
