@@ -1,4 +1,4 @@
-package com.example.phonecast
+package com.k1epic.phonecast
 
 import android.app.Activity
 import android.content.Context
