@@ -85,6 +85,8 @@ internal class PhoneCastAvcEncoder(
             setInteger(MediaFormat.KEY_FRAME_RATE, frameRate.coerceIn(5, 60))
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
             if (includeLatencyHints) {
+                // Baseline AVC has the broadest hardware-decoder compatibility on Android TV boxes.
+                setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
                 if (Build.VERSION.SDK_INT >= 26) setInteger(MediaFormat.KEY_LATENCY, 1)
                 if (Build.VERSION.SDK_INT >= 29) setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
             }

@@ -318,8 +318,14 @@ class TvReceiverActivity : Activity() {
     private fun queueDecoderInput(payload: ByteArray, pts: Long, flags: Int) {
         synchronized(decoderLock) {
             val active = decoder ?: throw IllegalStateException("رمزگشای H.264 آماده نیست.")
-            val inputIndex = active.dequeueInputBuffer(10_000)
-            if (inputIndex < 0) throw IllegalStateException("رمزگشای H.264 از دریافت فریم عقب افتاده است.")
+            var inputIndex = active.dequeueInputBuffer(10_000)
+            // TV Box decoders can temporarily have no free input buffer; wait briefly instead of dropping the connection.
+            var waitAttempts = 0
+            while (inputIndex < 0 && connected.get() && waitAttempts < 25) {
+                inputIndex = active.dequeueInputBuffer(20_000)
+                waitAttempts++
+            }
+            if (inputIndex < 0) throw IllegalStateException("رمزگشای H.264 برای دریافت فریم آماده نشد؛ کیفیت یا نرخ فریم را کاهش دهید.")
             val input = active.getInputBuffer(inputIndex)
                 ?: throw IllegalStateException("بافر ورودی H.264 در دسترس نیست.")
             input.clear()
