@@ -336,7 +336,7 @@ private class MjpegServer(
                 val safeError = lastFrameError.replace("\\", "/").replace("\r", " ").replace("\n", " ").replace("\"", "'")
                 val body = "frames=" + frameCount + "\njpegBytes=" + lastFrameBytes + "\nlastFrameAgeMs=" + age + "\nerror=" + safeError + "\n"
                 val bytes = body.toByteArray(Charsets.UTF_8)
-                out.write(("HTTP/1.1 200 OK\\r\\nContent-Type: text/plain; charset=utf-8\\r\\nCache-Control: no-cache\\r\\nContent-Length: " + bytes.size + "\\r\\nConnection: close\\r\\n\\r\\n").toByteArray())
+                out.write(("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-cache\r\nContent-Length: " + bytes.size + "\r\nConnection: close\r\n\r\n").toByteArray())
                 out.write(bytes)
                 out.flush()
             } else if (line.contains("/stream")) {
