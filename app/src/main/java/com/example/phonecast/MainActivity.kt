@@ -442,7 +442,27 @@ private class MjpegServer(
                     Thread.sleep(40)
                 }
             } else {
-                val html = """<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Phone Cast</title><style>html,body{margin:0;background:#111;color:#fff;font:16px sans-serif;height:100%;display:grid;place-items:center}main{width:100%;text-align:center}img{width:100%;height:auto;max-height:90vh;object-fit:contain}p{padding:8px}</style></head><body><main><p>Phone Cast — گیرندهٔ وب</p><img src="/stream" alt="Live phone screen"></main></body></html>"""
+                val safeName = displayName.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&#39;")
+                val html = """<!doctype html>
+<html lang="fa"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover"><title>PhoneCast</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#080a0e;color:#fff;font:14px system-ui,sans-serif}
+main{position:relative;width:100vw;height:100dvh;display:flex;align-items:center;justify-content:center;background:#080a0e}
+#screen{display:block;max-width:100vw;max-height:100dvh;width:auto;height:auto;object-fit:contain}
+#name{position:absolute;top:max(10px,env(safe-area-inset-top));left:max(10px,env(safe-area-inset-left));z-index:2;padding:5px 9px;border-radius:5px;background:#0009;color:#fff;font-size:clamp(11px,1.5vw,16px);max-width:65vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#credit{position:absolute;right:max(8px,env(safe-area-inset-right));bottom:max(7px,env(safe-area-inset-bottom));z-index:2;padding:3px 6px;border-radius:4px;background:#0008;color:#fff;font-size:10px;letter-spacing:.15px}
+#tools{position:absolute;right:10px;top:10px;z-index:3;opacity:.28;transition:opacity .2s}#tools:hover,#tools:focus-within{opacity:1}
+button{border:1px solid #ffffff55;border-radius:6px;background:#171a20;color:#fff;padding:7px 10px}
+.landscape #screen{width:100vw;height:100dvh;object-fit:contain}
+@media(orientation:landscape){main{width:100vw;height:100dvh}}
+</style></head><body><main id="stage"><div id="name">$safeName</div><div id="tools"><button id="fullscreen" type="button">تمام‌صفحه</button></div><img id="screen" src="/stream" alt="تصویر زندهٔ گوشی"><div id="credit">created by k1 shadnafar</div></main>
+<script>
+(()=>{const stage=document.getElementById('stage'),img=document.getElementById('screen'),btn=document.getElementById('fullscreen');
+const detect=()=>{if(img.naturalWidth&&img.naturalHeight){stage.classList.toggle('landscape',img.naturalWidth>img.naturalHeight);stage.classList.toggle('portrait',img.naturalHeight>=img.naturalWidth)}};
+setInterval(detect,500);img.addEventListener('load',detect);
+btn.addEventListener('click',()=>{if(!document.fullscreenElement){stage.requestFullscreen?.().catch(()=>{})}else{document.exitFullscreen?.()}});
+})();
+</script></body></html>"""
                 val bytes = html.toByteArray(Charsets.UTF_8)
                 out.write(("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n").toByteArray())
                 out.write(bytes)
