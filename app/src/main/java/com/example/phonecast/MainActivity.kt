@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.BroadcastReceiver
 import android.content.IntentFilter
+import android.content.res.Configuration
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
@@ -76,7 +77,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(36, 48, 36, 36)
         }
-        layout.addView(TextView(this).apply { text = "Phone Cast — آزمایشی"; textSize = 24f })
+        layout.addView(TextView(this).apply { text = "PhoneCast"; textSize = 24f })
         status = TextView(this).apply {
             text = "برای شروع، اشتراک‌گذاری صفحه را فعال کنید."
             textSize = 16f
@@ -147,7 +148,7 @@ class MainActivity : Activity() {
         if (metrics.widthPixels <= 0 || metrics.heightPixels <= 0) {
             throw IllegalStateException("ابعاد صفحه قابل تشخیص نیست")
         }
-        val maxWidth = prefs.getInt("max_width", 960).coerceIn(480, 960)
+        val maxWidth = prefs.getInt("max_width", 960).coerceIn(480, 2560)
         val width = (metrics.widthPixels.coerceAtMost(maxWidth) / 2 * 2).coerceAtLeast(2)
         val height = (metrics.heightPixels * width / metrics.widthPixels / 2 * 2).coerceAtLeast(2)
         Log.i(TAG, "Creating capture display: ${width}x${height}")
@@ -229,10 +230,13 @@ class MainActivity : Activity() {
         val newServer = MjpegServer(
             port = serverPort,
             displayName = displayName,
+            onIdleTimeout = { mainHandler.post { stopCaptureForIdle() } },
             onReady = {
                 mainHandler.post {
                     if (projection != null && display != null) {
                         running.set(true)
+                        server?.setCastingActive(true)
+                        server?.setLandscape(resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
                         status.text = "انتقال تصویر فعال است. گوشی و تلویزیون باید روی یک شبکهٔ Wi-Fi باشند."
                         address.text = "در مرورگر Android Box باز کنید:\nhttp://${localIp()}:$serverPort"
                     }
@@ -267,7 +271,7 @@ class MainActivity : Activity() {
         val ipField = field("IP برای نمایش آدرس (خالی = خودکار)", prefs.getString("advertised_ip", "") ?: "")
         val portField = field("Port (1024 تا 65535)", prefs.getInt("server_port", 8080).toString(), true)
         val fpsField = field("نرخ فریم هدف (5 تا 30)", prefs.getInt("target_fps", 15).toString(), true)
-        val widthField = field("حداکثر عرض تصویر (480 / 640 / 960)", prefs.getInt("max_width", 960).toString(), true)
+        val widthField = field("حداکثر عرض تصویر (480 / 640 / 960 / 1280 / 1600 / 1920 / 2560)", prefs.getInt("max_width", 960).toString(), true)
         val qualityField = field("کیفیت JPEG (40 تا 85)", prefs.getInt("jpeg_quality", 65).toString(), true)
         panel.addView(TextView(this).apply {
             text = "IP گوشی به‌صورت خودکار از شبکهٔ Wi-Fi تشخیص داده می‌شود؛ برای تغییر IP باید تنظیمات شبکهٔ گوشی/روتر را تغییر دهید."
@@ -281,8 +285,8 @@ class MainActivity : Activity() {
                 val width = widthField.text.toString().toIntOrNull()
                 val quality = qualityField.text.toString().toIntOrNull()
                 if (port == null || port !in 1024..65535 || fps == null || fps !in 5..30 ||
-                    width == null || width !in listOf(480, 640, 960) || quality == null || quality !in 40..85) {
-                    Toast.makeText(this, "مقادیر نامعتبر است؛ پورت 1024–65535، FPS برابر 5–30، عرض 480/640/960 و کیفیت 40–85 باشد.", Toast.LENGTH_LONG).show()
+                    width == null || width !in listOf(480, 640, 960, 1280, 1600, 1920, 2560) || quality == null || quality !in 40..85) {
+                    Toast.makeText(this, "مقادیر نامعتبر است؛ پورت 1024–65535، FPS برابر 5–30، عرض 480/640/960/1280/1600/1920/2560 و کیفیت 40–85 باشد.", Toast.LENGTH_LONG).show()
                     return@setPositiveButton
                 }
                 prefs.edit().putString("display_name", nameField.text.toString().trim().ifBlank { "PhoneCast" }.take(40))
@@ -292,6 +296,27 @@ class MainActivity : Activity() {
                 Toast.makeText(this, "تنظیمات ذخیره شد. برای اعمال پورت جدید، انتقال را متوقف و دوباره شروع کنید.", Toast.LENGTH_LONG).show()
                 if (::address.isInitialized) address.text = "آدرس گیرنده: http://${displayIp()}:$port"
             }.show()
+    }
+
+    private fun stopCaptureForIdle() {
+        if (!running.get()) return
+        Log.i(TAG, "No web viewer for five minutes; stopping capture but keeping web status page available")
+        running.set(false)
+        try { display?.release() } catch (e: Exception) { Log.w(TAG, "display release after idle", e) }
+        display = null
+        try { reader?.setOnImageAvailableListener(null, null); reader?.close() } catch (e: Exception) { Log.w(TAG, "reader close after idle", e) }
+        reader = null
+        val oldProjection = projection
+        projection = null
+        try { oldProjection?.stop() } catch (e: Exception) { Log.w(TAG, "projection stop after idle", e) }
+        server?.setCastingActive(false)
+        if (::status.isInitialized) status.text = "انتقال به‌دلیل نبود گیرندهٔ وب برای ۵ دقیقه متوقف شد."
+        if (::address.isInitialized) address.text = "برای راه‌اندازی مجدد، دکمهٔ شروع انتقال تصویر را در برنامه بزنید."
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        server?.setLandscape(newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE)
     }
 
     private fun showFailure(message: String) {
@@ -358,9 +383,15 @@ private class MjpegServer(
     private val port: Int,
     private val displayName: String,
     private val onReady: () -> Unit,
-    private val onError: (Exception) -> Unit
+    private val onError: (Exception) -> Unit,
+    private val onIdleTimeout: () -> Unit
 ) {
     @Volatile private var latestFrame: ByteArray? = null
+    @Volatile private var castingActive: Boolean = false
+    @Volatile private var landscape: Boolean = false
+    private val viewerActive = AtomicBoolean(false)
+    @Volatile private var lastViewerActivityAt: Long = System.currentTimeMillis()
+    @Volatile private var idleTimeoutNotified: Boolean = false
     @Volatile private var socketServer: ServerSocket? = null
     private val alive = AtomicBoolean(false)
     @Volatile private var imageCallbacks: Long = 0
@@ -374,6 +405,8 @@ private class MjpegServer(
     @Volatile private var lastFrameAt: Long = 0
     @Volatile private var lastFrameError: String = "No frame received yet"
 
+    fun setCastingActive(active: Boolean) { castingActive = active }
+    fun setLandscape(value: Boolean) { landscape = value }
     fun noteImageCallback() { imageCallbacks++ }
     fun noteImageAcquired() { acquiredImages++ }
     fun noteJpegFailure() { jpegFailures++ }
@@ -401,6 +434,15 @@ private class MjpegServer(
                 socketServer = ss
                 Log.i("PhoneCast", "HTTP server listening on $port")
                 onReady()
+                Thread({
+                    while (alive.get()) {
+                        try { Thread.sleep(5000) } catch (_: InterruptedException) { break }
+                        if (alive.get() && !viewerActive.get() && !idleTimeoutNotified && System.currentTimeMillis() - lastViewerActivityAt >= 300000L) {
+                            idleTimeoutNotified = true
+                            onIdleTimeout()
+                        }
+                    }
+                }, "PhoneCastIdleMonitor").start()
                 while (alive.get()) {
                     val client = ss.accept()
                     Thread({ handle(client) }, "PhoneCastClient").start()
@@ -423,12 +465,16 @@ private class MjpegServer(
             if (line.startsWith("GET /status")) {
                 val age = if (lastFrameAt == 0L) -1L else System.currentTimeMillis() - lastFrameAt
                 val safeError = lastFrameError.replace("\\", "/").replace("\r", " ").replace("\n", " ").replace("\"", "'")
-                val body = "callbacks=" + imageCallbacks + "\nimagesAcquired=" + acquiredImages + "\nnullImages=" + nullImages + "\nacquireErrors=" + acquireErrors + "\nlastAcquireError=" + lastAcquireError + "\njpegFailures=" + jpegFailures + "\nframes=" + frameCount + "\njpegBytes=" + lastFrameBytes + "\nlastFrameAgeMs=" + age + "\nerror=" + safeError + "\n"
+                val body = "casting=" + castingActive + "\\nlandscape=" + landscape + "\\ncallbacks=" + imageCallbacks + "\nimagesAcquired=" + acquiredImages + "\nnullImages=" + nullImages + "\nacquireErrors=" + acquireErrors + "\nlastAcquireError=" + lastAcquireError + "\njpegFailures=" + jpegFailures + "\nframes=" + frameCount + "\njpegBytes=" + lastFrameBytes + "\nlastFrameAgeMs=" + age + "\nerror=" + safeError + "\n"
                 val bytes = body.toByteArray(Charsets.UTF_8)
                 out.write(("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-cache\r\nContent-Length: " + bytes.size + "\r\nConnection: close\r\n\r\n").toByteArray())
                 out.write(bytes)
                 out.flush()
             } else if (line.contains("/stream")) {
+                if (!castingActive) { val body = "انتقال تصویر متوقف است. برای راه‌اندازی مجدد، دکمهٔ شروع انتقال تصویر را در برنامه بزنید."; val bytes = body.toByteArray(Charsets.UTF_8); out.write(("HTTP/1.1 503 Service Unavailable\\r\\nContent-Type: text/plain; charset=utf-8\\r\\nContent-Length: " + bytes.size + "\\r\\nConnection: close\\r\\n\\r\\n").toByteArray()); out.write(bytes); out.flush(); return }
+                if (!viewerActive.compareAndSet(false, true)) { val body = "این PhoneCast در حال حاضر توسط دستگاه دیگری استفاده می‌شود."; val bytes = body.toByteArray(Charsets.UTF_8); out.write(("HTTP/1.1 409 Conflict\\r\\nContent-Type: text/plain; charset=utf-8\\r\\nContent-Length: " + bytes.size + "\\r\\nConnection: close\\r\\n\\r\\n").toByteArray()); out.write(bytes); out.flush(); return }
+                lastViewerActivityAt = System.currentTimeMillis(); idleTimeoutNotified = false
+                try {
                 out.write(("HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=frame\r\nCache-Control: no-cache\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n").toByteArray())
                 out.flush()
                 var lastFrame: ByteArray? = null
@@ -445,6 +491,7 @@ private class MjpegServer(
                     lastFrame = frame
                     Thread.sleep(40)
                 }
+                } finally { viewerActive.set(false); lastViewerActivityAt = System.currentTimeMillis() }
             } else {
                 val safeName = displayName.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&#39;")
                 val html = """<!doctype html>
@@ -453,6 +500,7 @@ private class MjpegServer(
 *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#080a0e;color:#fff;font:14px system-ui,sans-serif}
 main{position:relative;width:100vw;height:100dvh;display:flex;align-items:center;justify-content:center;background:#080a0e}
 #screen{display:block;max-width:100vw;max-height:100dvh;width:auto;height:auto;object-fit:contain}
+#stage.landscape #screen{width:100dvh;height:100vw;max-width:none;max-height:none;transform:rotate(90deg);transform-origin:center;object-fit:contain}
 #name{position:absolute;top:max(10px,env(safe-area-inset-top));left:max(10px,env(safe-area-inset-left));z-index:2;padding:5px 9px;border-radius:5px;background:#0009;color:#fff;font-size:clamp(11px,1.5vw,16px);max-width:65vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #credit{position:absolute;right:max(8px,env(safe-area-inset-right));bottom:max(7px,env(safe-area-inset-bottom));z-index:2;padding:3px 6px;border-radius:4px;background:#0008;color:#fff;font-size:10px;letter-spacing:.15px}
 #tools{position:absolute;right:10px;top:10px;z-index:3;opacity:.28;transition:opacity .2s}#tools:hover,#tools:focus-within{opacity:1}
@@ -464,6 +512,8 @@ button{border:1px solid #ffffff55;border-radius:6px;background:#171a20;color:#ff
 (()=>{const stage=document.getElementById('stage'),img=document.getElementById('screen'),btn=document.getElementById('fullscreen');
 const detect=()=>{if(img.naturalWidth&&img.naturalHeight){stage.classList.toggle('landscape',img.naturalWidth>img.naturalHeight);stage.classList.toggle('portrait',img.naturalHeight>=img.naturalWidth)}};
 setInterval(detect,500);img.addEventListener('load',detect);
+const pollStatus=async()=>{try{const r=await fetch('/status?t='+Date.now(),{cache:'no-store'});const t=await r.text();const v=Object.fromEntries(t.trim().split(/\\r?\\n/).map(x=>x.split('=')).filter(x=>x.length===2));stage.classList.toggle('landscape',v.landscape==='true');let notice=document.getElementById('notice');if(!notice){notice=document.createElement('div');notice.id='notice';notice.style.cssText='position:absolute;inset:0;z-index:4;display:none;align-items:center;justify-content:center;text-align:center;padding:24px;background:#080a0e;color:#fff;font-size:clamp(16px,2.4vw,24px);line-height:1.8';stage.appendChild(notice)}if(v.casting!=='true'){notice.style.display='flex';notice.textContent='انتقال تصویر متوقف است. برای راه‌اندازی مجدد، در برنامهٔ PhoneCast دکمهٔ «شروع انتقال تصویر» را بزنید.';img.style.visibility='hidden'}else{notice.style.display='none';img.style.visibility='visible'}}catch(e){}};
+pollStatus();setInterval(pollStatus,2000);
 btn.addEventListener('click',()=>{if(!document.fullscreenElement){stage.requestFullscreen?.().catch(()=>{})}else{document.exitFullscreen?.()}});
 })();
 </script></body></html>"""
