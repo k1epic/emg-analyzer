@@ -29,6 +29,9 @@ import android.widget.TextView
 import android.widget.Toast
 import java.io.ByteArrayOutputStream
 import java.net.ServerSocket
+import java.nio.ByteBuffer
+import java.util.concurrent.LinkedBlockingDeque
+import java.util.concurrent.TimeUnit
 import java.net.Socket
 import java.net.Inet4Address
 import java.net.NetworkInterface
@@ -44,6 +47,8 @@ class MainActivity : Activity() {
     private var projection: MediaProjection? = null
     private var display: VirtualDisplay? = null
     private var reader: ImageReader? = null
+    private var h264Encoder: PhoneCastAvcEncoder? = null
+    @Volatile private var h264Mode = true
     @Volatile private var captureWidth = 0
     @Volatile private var captureHeight = 0
     @Volatile private var captureDensityDpi = 0
@@ -158,6 +163,7 @@ class MainActivity : Activity() {
 
     private fun startCasting(resultCode: Int, data: Intent) {
         releaseResources(stopProjection = true)
+        h264Mode = prefs.getBoolean("h264_enabled", true)
         status.text = "در حال راه‌اندازی انتقال تصویر…"
         address.text = "در حال آماده‌سازی سرور شبکه…"
 
@@ -175,7 +181,7 @@ class MainActivity : Activity() {
         captureWidth = width
         captureHeight = height
         captureDensityDpi = metrics.densityDpi
-        reader = createCaptureReader(width, height)
+        reader = if (h264Mode) null else createCaptureReader(width, height)
 
         projection = projectionManager.getMediaProjection(resultCode, data)
             ?: throw IllegalStateException("سیستم مجوز MediaProjection را برنگرداند")
@@ -194,13 +200,19 @@ class MainActivity : Activity() {
 
         val serverPort = prefs.getInt("server_port", 8080).coerceIn(1024, 65535)
         val displayName = prefs.getString("display_name", "PhoneCast")?.take(40) ?: "PhoneCast"
+        val targetFps = prefs.getInt("target_fps", 15).coerceIn(5, 30)
         val newServer = MjpegServer(
             port = serverPort,
             displayName = displayName,
+            h264Enabled = h264Mode,
+            initialWidth = width,
+            initialHeight = height,
+            initialFps = targetFps,
+            onH264ClientConnected = { h264Encoder?.requestSyncFrame() },
             onIdleTimeout = { mainHandler.post { stopCaptureForIdle() } },
             onReady = {
                 mainHandler.post {
-                    if (projection != null && display != null) {
+                    if (projection != null) {
                         running.set(true)
                         server?.setCastingActive(true)
                         server?.setLandscape(resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
@@ -217,9 +229,26 @@ class MainActivity : Activity() {
         server = newServer
         newServer.start()
 
+        val captureSurface = if (h264Mode) {
+            val encoder = PhoneCastAvcEncoder(
+                width = width,
+                height = height,
+                frameRate = targetFps,
+                bitRate = prefs.getInt("h264_bitrate_mbps", 4).coerceIn(1, 20) * 1_000_000,
+                onPacket = { packet -> server?.setH264Packet(packet) },
+                onError = { message ->
+                    server?.setFrameError("H.264 encoder: " + message)
+                    mainHandler.post { if (running.get()) status.text = "خطای رمزگذاری H.264: $message" }
+                }
+            )
+            h264Encoder = encoder
+            encoder.start()
+        } else {
+            reader!!.surface
+        }
         display = projection!!.createVirtualDisplay(
             "PhoneCastDisplay", width, height, metrics.densityDpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader!!.surface, null, mainHandler
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, captureSurface, null, mainHandler
         ) ?: throw IllegalStateException("ساخت VirtualDisplay ناموفق بود")
         Log.i(TAG, "VirtualDisplay created")
     }
@@ -292,6 +321,14 @@ class MainActivity : Activity() {
         val maxWidth = prefs.getInt("max_width", 960).coerceIn(480, 2560)
         val width = (metrics.widthPixels.coerceAtMost(maxWidth) / 2 * 2).coerceAtLeast(2)
         val height = (metrics.heightPixels * width / metrics.widthPixels / 2 * 2).coerceAtLeast(2)
+        if (h264Mode) {
+            if (width == captureWidth && height == captureHeight) {
+                server?.setLandscape(metrics.widthPixels > metrics.heightPixels)
+                return
+            }
+            resizeH264Capture(width, height, metrics.densityDpi)
+            return
+        }
         if (width == captureWidth && height == captureHeight) {
             server?.setLandscape(metrics.widthPixels > metrics.heightPixels)
             return
@@ -317,6 +354,52 @@ class MainActivity : Activity() {
         }
     }
 
+
+    private fun resizeH264Capture(width: Int, height: Int, densityDpi: Int) {
+        if (!running.get() || projection == null) return
+        var nextEncoder: PhoneCastAvcEncoder? = null
+        try {
+            try { display?.release() } catch (e: Exception) { Log.w(TAG, "old H.264 display release", e) }
+            display = null
+            try { h264Encoder?.stop() } catch (e: Exception) { Log.w(TAG, "old H.264 encoder stop", e) }
+            h264Encoder = null
+
+            val targetFps = prefs.getInt("target_fps", 15).coerceIn(5, 30)
+            server?.setVideoSize(width, height, targetFps)
+            nextEncoder = PhoneCastAvcEncoder(
+                width = width,
+                height = height,
+                frameRate = targetFps,
+                bitRate = prefs.getInt("h264_bitrate_mbps", 4).coerceIn(1, 20) * 1_000_000,
+                onPacket = { packet -> server?.setH264Packet(packet) },
+                onError = { message ->
+                    server?.setFrameError("H.264 encoder: " + message)
+                    mainHandler.post { if (running.get()) status.text = "خطای رمزگذاری H.264: $message" }
+                }
+            )
+            h264Encoder = nextEncoder
+            val surface = nextEncoder.start()
+            display = projection!!.createVirtualDisplay(
+                "PhoneCastDisplay", width, height, densityDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, surface, null, mainHandler
+            ) ?: throw IllegalStateException("ساخت VirtualDisplay پس از چرخش ناموفق بود")
+
+            captureWidth = width
+            captureHeight = height
+            captureDensityDpi = densityDpi
+            server?.setLandscape(width > height)
+            Log.i(TAG, "Resized H.264 capture to ${width}x${height}")
+        } catch (e: Exception) {
+            try { display?.release() } catch (_: Exception) {}
+            display = null
+            try { nextEncoder?.stop() } catch (_: Exception) {}
+            h264Encoder = null
+            Log.e(TAG, "Could not resize H.264 capture after orientation change", e)
+            server?.setFrameError("H.264 orientation resize failed: " + (e.message ?: e.javaClass.simpleName))
+            mainHandler.post { status.text = "تغییر جهت تصویر ناموفق بود؛ انتقال را متوقف و دوباره شروع کنید." }
+        }
+    }
+
     private fun showSettings() {
         val panel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(28, 8, 28, 8) }
         fun field(label: String, value: String, numeric: Boolean = false): EditText {
@@ -333,6 +416,13 @@ class MainActivity : Activity() {
         val fpsField = field("نرخ فریم هدف (5 تا 30)", prefs.getInt("target_fps", 15).toString(), true)
         val widthField = field("حداکثر عرض تصویر (480 / 640 / 960 / 1280 / 1600 / 1920 / 2560)", prefs.getInt("max_width", 960).toString(), true)
         val qualityField = field("کیفیت JPEG (40 تا 100)", prefs.getInt("jpeg_quality", 65).toString(), true)
+        val h264Check = CheckBox(this).apply {
+            text = "استفاده از H.264 سخت‌افزاری (توصیه‌شده برای گیرنده TV)"
+            isChecked = prefs.getBoolean("h264_enabled", true)
+            setPadding(0, 14, 0, 4)
+        }
+        panel.addView(h264Check)
+        val bitrateField = field("نرخ بیت H.264 (Mbps، از 1 تا 20)", prefs.getInt("h264_bitrate_mbps", 4).toString(), true)
         panel.addView(TextView(this).apply {
             text = "IP گوشی به‌صورت خودکار از شبکهٔ Wi-Fi تشخیص داده می‌شود؛ برای تغییر IP باید تنظیمات شبکهٔ گوشی/روتر را تغییر دهید."
             textSize = 12f; setPadding(0, 12, 0, 0)
@@ -344,16 +434,19 @@ class MainActivity : Activity() {
                 val fps = fpsField.text.toString().toIntOrNull()
                 val width = widthField.text.toString().toIntOrNull()
                 val quality = qualityField.text.toString().toIntOrNull()
+                val bitrate = bitrateField.text.toString().toIntOrNull()
                 if (port == null || port !in 1024..65535 || fps == null || fps !in 5..30 ||
-                    width == null || width !in listOf(480, 640, 960, 1280, 1600, 1920, 2560) || quality == null || quality !in 40..100) {
+                    width == null || width !in listOf(480, 640, 960, 1280, 1600, 1920, 2560) || quality == null || quality !in 40..100 ||
+                    bitrate == null || bitrate !in 1..20) {
                     Toast.makeText(this, "مقادیر نامعتبر است؛ پورت 1024–65535، FPS برابر 5–30، عرض 480/640/960/1280/1600/1920/2560 و کیفیت 40–100 باشد.", Toast.LENGTH_LONG).show()
                     return@setPositiveButton
                 }
                 prefs.edit().putString("display_name", nameField.text.toString().trim().ifBlank { "PhoneCast" }.take(40))
                     .putString("advertised_ip", ipField.text.toString().trim())
                     .putInt("server_port", port).putInt("target_fps", fps).putInt("max_width", width)
-                    .putInt("jpeg_quality", quality).apply()
-                Toast.makeText(this, "تنظیمات ذخیره شد. برای اعمال پورت جدید، انتقال را متوقف و دوباره شروع کنید.", Toast.LENGTH_LONG).show()
+                    .putInt("jpeg_quality", quality).putBoolean("h264_enabled", h264Check.isChecked)
+                    .putInt("h264_bitrate_mbps", bitrate).apply()
+                Toast.makeText(this, "تنظیمات ذخیره شد. برای اعمال تغییرات، انتقال را متوقف و دوباره شروع کنید.", Toast.LENGTH_LONG).show()
                 if (::address.isInitialized) address.text = "آدرس گیرنده: http://${displayIp()}:$port"
             }.show()
     }
@@ -364,6 +457,8 @@ class MainActivity : Activity() {
         running.set(false)
         try { display?.release() } catch (e: Exception) { Log.w(TAG, "display release after idle", e) }
         display = null
+        try { h264Encoder?.stop() } catch (e: Exception) { Log.w(TAG, "H.264 encoder stop after idle", e) }
+        h264Encoder = null
         try { reader?.setOnImageAvailableListener(null, null); reader?.close() } catch (e: Exception) { Log.w(TAG, "reader close after idle", e) }
         reader = null
         val oldProjection = projection
@@ -401,6 +496,8 @@ class MainActivity : Activity() {
         running.set(false)
         try { display?.release() } catch (e: Exception) { Log.w(TAG, "display release", e) }
         display = null
+        try { h264Encoder?.stop() } catch (e: Exception) { Log.w(TAG, "H.264 encoder stop", e) }
+        h264Encoder = null
         try { reader?.setOnImageAvailableListener(null, null); reader?.close() } catch (e: Exception) { Log.w(TAG, "reader close", e) }
         reader = null
         val oldProjection = projection
@@ -443,6 +540,11 @@ class MainActivity : Activity() {
 private class MjpegServer(
     private val port: Int,
     private val displayName: String,
+    private val h264Enabled: Boolean,
+    initialWidth: Int,
+    initialHeight: Int,
+    initialFps: Int,
+    private val onH264ClientConnected: () -> Unit,
     private val onReady: () -> Unit,
     private val onError: (Exception) -> Unit,
     private val onIdleTimeout: () -> Unit
@@ -452,6 +554,14 @@ private class MjpegServer(
     @Volatile private var landscape: Boolean = false
     @Volatile private var screenCssEnabled: Boolean = true
     private val viewerActive = AtomicBoolean(false)
+    private val h264Queue = LinkedBlockingDeque<ByteArray>(45)
+    private val h264Lock = Any()
+    @Volatile private var h264ClientActive = false
+    @Volatile private var h264ConfigPacket: ByteArray? = null
+    @Volatile private var h264WaitingForKeyFrame = true
+    @Volatile private var videoWidth = initialWidth
+    @Volatile private var videoHeight = initialHeight
+    @Volatile private var videoFps = initialFps
     @Volatile private var lastViewerActivityAt: Long = System.currentTimeMillis()
     @Volatile private var idleTimeoutNotified: Boolean = false
     @Volatile private var socketServer: ServerSocket? = null
@@ -470,6 +580,45 @@ private class MjpegServer(
     fun setCastingActive(active: Boolean) { castingActive = active }
     fun setLandscape(value: Boolean) { landscape = value }
     fun setScreenCssEnabled(value: Boolean) { screenCssEnabled = value }
+    fun setVideoSize(width: Int, height: Int, fps: Int) {
+        videoWidth = width
+        videoHeight = height
+        videoFps = fps
+    }
+
+    /** Receives a framed H.264 packet from PhoneCastAvcEncoder. */
+    fun setH264Packet(packet: ByteArray) {
+        if (packet.size < 24) return
+        val header = ByteBuffer.wrap(packet)
+        val payloadSize = header.int
+        val flags = header.int
+        if (payloadSize < 0 || payloadSize != packet.size - 24) return
+        synchronized(h264Lock) {
+            if ((flags and 2) != 0) {
+                h264ConfigPacket = packet
+                if (h264ClientActive) {
+                    h264Queue.clear()
+                    h264Queue.offer(packet)
+                    h264WaitingForKeyFrame = true
+                }
+                return
+            }
+            if (!h264ClientActive) return
+            if (h264WaitingForKeyFrame && (flags and 1) == 0) return
+            if (!h264Queue.offer(packet)) {
+                h264Queue.clear()
+                h264ConfigPacket?.let { h264Queue.offer(it) }
+                h264WaitingForKeyFrame = true
+                if ((flags and 1) != 0) {
+                    h264Queue.offer(packet)
+                    h264WaitingForKeyFrame = false
+                }
+                onH264ClientConnected()
+                return
+            }
+            if ((flags and 1) != 0) h264WaitingForKeyFrame = false
+        }
+    }
     fun noteImageCallback() { imageCallbacks++ }
     fun noteImageAcquired() { acquiredImages++ }
     fun noteJpegFailure() { jpegFailures++ }
@@ -528,12 +677,60 @@ private class MjpegServer(
             if (line.startsWith("GET /status")) {
                 val age = if (lastFrameAt == 0L) -1L else System.currentTimeMillis() - lastFrameAt
                 val safeError = lastFrameError.replace("\\", "/").replace("\r", " ").replace("\n", " ").replace("\"", "'")
-                val body = "casting=" + castingActive + "\nlandscape=" + landscape + "\nscreenCssEnabled=" + screenCssEnabled + "\ncallbacks=" + imageCallbacks + "\nimagesAcquired=" + acquiredImages + "\nnullImages=" + nullImages + "\nacquireErrors=" + acquireErrors + "\nlastAcquireError=" + lastAcquireError + "\njpegFailures=" + jpegFailures + "\nframes=" + frameCount + "\njpegBytes=" + lastFrameBytes + "\nlastFrameAgeMs=" + age + "\nerror=" + safeError + "\n"
+                val body = "casting=" + castingActive + "\nlandscape=" + landscape + "\nscreenCssEnabled=" + screenCssEnabled + "\nmode=" + (if (h264Enabled) "h264" else "mjpeg") + "\nwidth=" + videoWidth + "\nheight=" + videoHeight + "\nfps=" + videoFps + "\ncallbacks=" + imageCallbacks + "\nimagesAcquired=" + acquiredImages + "\nnullImages=" + nullImages + "\nacquireErrors=" + acquireErrors + "\nlastAcquireError=" + lastAcquireError + "\njpegFailures=" + jpegFailures + "\nframes=" + frameCount + "\njpegBytes=" + lastFrameBytes + "\nlastFrameAgeMs=" + age + "\nerror=" + safeError + "\n"
                 val bytes = body.toByteArray(Charsets.UTF_8)
                 out.write(("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-cache\r\nContent-Length: " + bytes.size + "\r\nConnection: close\r\n\r\n").toByteArray())
                 out.write(bytes)
                 out.flush()
+            } else if (line.startsWith("GET /h264")) {
+                if (!h264Enabled) {
+                    val body = "H.264 غیر‌فعال است. تنظیمات PhoneCast را باز کنید و H.264 را روشن کنید."
+                    val bytes = body.toByteArray(Charsets.UTF_8)
+                    out.write(("HTTP/1.1 415 Unsupported Media Type\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: " + bytes.size + "\r\nConnection: close\r\n\r\n").toByteArray())
+                    out.write(bytes); out.flush(); return
+                }
+                if (!castingActive) {
+                    val bytes = "انتقال تصویر متوقف است.".toByteArray(Charsets.UTF_8)
+                    out.write(("HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: " + bytes.size + "\r\nConnection: close\r\n\r\n").toByteArray())
+                    out.write(bytes); out.flush(); return
+                }
+                if (!viewerActive.compareAndSet(false, true)) {
+                    val bytes = "گیرندهٔ دیگری در حال استفاده است.".toByteArray(Charsets.UTF_8)
+                    out.write(("HTTP/1.1 409 Conflict\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: " + bytes.size + "\r\nConnection: close\r\n\r\n").toByteArray())
+                    out.write(bytes); out.flush(); return
+                }
+                synchronized(h264Lock) {
+                    h264ClientActive = true
+                    h264WaitingForKeyFrame = true
+                    h264Queue.clear()
+                    h264ConfigPacket?.let { h264Queue.offer(it) }
+                }
+                lastViewerActivityAt = System.currentTimeMillis(); idleTimeoutNotified = false
+                try {
+                    out.write(("HTTP/1.1 200 OK\r\nContent-Type: application/x-phonecast-avc-framed\r\nX-PhoneCast-Protocol: avc-framed-v1\r\nX-PhoneCast-Width: " + videoWidth + "\r\nX-PhoneCast-Height: " + videoHeight + "\r\nX-PhoneCast-FPS: " + videoFps + "\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n").toByteArray())
+                    out.flush()
+                    onH264ClientConnected()
+                    while (alive.get() && !client.isClosed) {
+                        val packet = h264Queue.poll(1, TimeUnit.SECONDS) ?: continue
+                        out.write(packet)
+                        out.flush()
+                    }
+                } finally {
+                    synchronized(h264Lock) {
+                        h264ClientActive = false
+                        h264WaitingForKeyFrame = true
+                        h264Queue.clear()
+                    }
+                    viewerActive.set(false)
+                    lastViewerActivityAt = System.currentTimeMillis()
+                }
             } else if (line.contains("/stream")) {
+                if (h264Enabled) {
+                    val body = "این فرستنده در حالت H.264 است؛ از برنامهٔ PhoneCast TV Receiver استفاده کنید یا H.264 را خاموش کنید."
+                    val bytes = body.toByteArray(Charsets.UTF_8)
+                    out.write(("HTTP/1.1 415 Unsupported Media Type\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: " + bytes.size + "\r\nConnection: close\r\n\r\n").toByteArray())
+                    out.write(bytes); out.flush(); return
+                }
                 if (!castingActive) { val body = "انتقال تصویر متوقف است. برای راه‌اندازی مجدد، دکمهٔ شروع انتقال تصویر را در برنامه بزنید."; val bytes = body.toByteArray(Charsets.UTF_8); out.write(("HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: " + bytes.size + "\r\nConnection: close\r\n\r\n").toByteArray()); out.write(bytes); out.flush(); return }
                 if (!viewerActive.compareAndSet(false, true)) { val body = "این PhoneCast در حال حاضر توسط دستگاه دیگری استفاده می‌شود."; val bytes = body.toByteArray(Charsets.UTF_8); out.write(("HTTP/1.1 409 Conflict\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: " + bytes.size + "\r\nConnection: close\r\n\r\n").toByteArray()); out.write(bytes); out.flush(); return }
                 lastViewerActivityAt = System.currentTimeMillis(); idleTimeoutNotified = false
@@ -557,6 +754,7 @@ private class MjpegServer(
                 } finally { viewerActive.set(false); lastViewerActivityAt = System.currentTimeMillis() }
             } else {
                 val safeName = displayName.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&#39;")
+                val screenElement = if (h264Enabled) """<div id="screen" style="display:flex;align-items:center;justify-content:center;padding:24px;text-align:center;line-height:1.8">حالت H.264 فعال است. برای نمایش تصویر، برنامهٔ PhoneCast TV Receiver را روی Android TV Box باز کنید.</div>""" else """<img id="screen" src="/stream" alt="تصویر زندهٔ گوشی">"""
                 val html = """<!doctype html>
 <html lang="fa"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover"><title>PhoneCast</title>
 <style>
@@ -568,7 +766,7 @@ main{position:relative;width:100vw;height:100dvh;display:flex;align-items:center
 #tools{position:absolute;right:10px;top:10px;z-index:3;opacity:.28;transition:opacity .2s}#tools:hover,#tools:focus-within{opacity:1}
 button{border:1px solid #ffffff55;border-radius:6px;background:#171a20;color:#fff;padding:7px 10px}
 @media(orientation:landscape){main{width:100vw;height:100dvh}}
-</style></head><body><main id="stage"><div id="name">$safeName</div><div id="tools"><button id="fullscreen" type="button">تمام‌صفحه</button></div><img id="screen" src="/stream" alt="تصویر زندهٔ گوشی"><div id="credit">created by k1 shadnafar</div></main>
+</style></head><body><main id="stage"><div id="name">$safeName</div><div id="tools"><button id="fullscreen" type="button">تمام‌صفحه</button></div>${screenElement}<div id="credit">created by k1 shadnafar</div></main>
 <script>
 (()=>{const stage=document.getElementById('stage'),img=document.getElementById('screen'),btn=document.getElementById('fullscreen');
 const detect=()=>{};
@@ -590,6 +788,10 @@ btn.addEventListener('click',()=>{if(!document.fullscreenElement){stage.requestF
 
     fun close() {
         alive.set(false)
+        synchronized(h264Lock) {
+            h264ClientActive = false
+            h264Queue.clear()
+        }
         try { socketServer?.close() } catch (_: Exception) {}
         socketServer = null
     }
