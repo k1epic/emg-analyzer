@@ -94,6 +94,21 @@ class MainActivity : Activity() {
         }
         layout.addView(status)
         layout.addView(address)
+        val screenCssCheck = CheckBox(this).apply {
+            text = "فعال‌سازی هم‌زمان چهار ویژگی اندازهٔ تصویر در مرورگر"
+            isChecked = prefs.getBoolean("screen_css_enabled", true)
+            setPadding(0, 8, 0, 8)
+            setOnCheckedChangeListener { _, enabled ->
+                prefs.edit().putBoolean("screen_css_enabled", enabled).apply()
+                server?.setScreenCssEnabled(enabled)
+                Toast.makeText(
+                    this@MainActivity,
+                    if (enabled) "تنظیمات اندازهٔ تصویر مرورگر فعال شد." else "تنظیمات اندازهٔ تصویر مرورگر غیرفعال شد.",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+        layout.addView(screenCssCheck)
         layout.addView(Button(this).apply {
             text = "شروع انتقال تصویر"
             setOnClickListener {
@@ -318,12 +333,6 @@ class MainActivity : Activity() {
         val fpsField = field("نرخ فریم هدف (5 تا 30)", prefs.getInt("target_fps", 15).toString(), true)
         val widthField = field("حداکثر عرض تصویر (480 / 640 / 960 / 1280 / 1600 / 1920 / 2560)", prefs.getInt("max_width", 960).toString(), true)
         val qualityField = field("کیفیت JPEG (40 تا 100)", prefs.getInt("jpeg_quality", 65).toString(), true)
-        val screenCssCheck = CheckBox(this).apply {
-            text = "فعال بودن تنظیمات اندازهٔ تصویر در مرورگر (CSS) — یک تیک برای هر چهار مورد"
-            isChecked = prefs.getBoolean("screen_css_enabled", true)
-            setPadding(0, 12, 0, 4)
-        }
-        panel.addView(screenCssCheck)
         panel.addView(TextView(this).apply {
             text = "IP گوشی به‌صورت خودکار از شبکهٔ Wi-Fi تشخیص داده می‌شود؛ برای تغییر IP باید تنظیمات شبکهٔ گوشی/روتر را تغییر دهید."
             textSize = 12f; setPadding(0, 12, 0, 0)
@@ -343,8 +352,7 @@ class MainActivity : Activity() {
                 prefs.edit().putString("display_name", nameField.text.toString().trim().ifBlank { "PhoneCast" }.take(40))
                     .putString("advertised_ip", ipField.text.toString().trim())
                     .putInt("server_port", port).putInt("target_fps", fps).putInt("max_width", width)
-                    .putInt("jpeg_quality", quality).putBoolean("screen_css_enabled", screenCssCheck.isChecked).apply()
-                server?.setScreenCssEnabled(screenCssCheck.isChecked)
+                    .putInt("jpeg_quality", quality).apply()
                 Toast.makeText(this, "تنظیمات ذخیره شد. برای اعمال پورت جدید، انتقال را متوقف و دوباره شروع کنید.", Toast.LENGTH_LONG).show()
                 if (::address.isInitialized) address.text = "آدرس گیرنده: http://${displayIp()}:$port"
             }.show()
