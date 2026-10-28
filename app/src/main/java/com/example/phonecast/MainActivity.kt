@@ -43,6 +43,9 @@ class MainActivity : Activity() {
     private var projection: MediaProjection? = null
     private var display: VirtualDisplay? = null
     private var reader: ImageReader? = null
+    @Volatile private var captureWidth = 0
+    @Volatile private var captureHeight = 0
+    @Volatile private var captureDensityDpi = 0
     private var server: MjpegServer? = null
     private val running = AtomicBoolean(false)
     private val requestCapture = 1001
@@ -153,62 +156,10 @@ class MainActivity : Activity() {
         val height = (metrics.heightPixels * width / metrics.widthPixels / 2 * 2).coerceAtLeast(2)
         Log.i(TAG, "Creating capture display: ${width}x${height}")
 
-        reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
-        reader!!.setOnImageAvailableListener({ imageReader ->
-            server?.noteImageCallback()
-            val image = try { imageReader.acquireLatestImage() } catch (e: Exception) {
-                Log.w(TAG, "acquireLatestImage failed", e)
-                server?.noteAcquireError(e.javaClass.simpleName + ": " + (e.message ?: "unknown"))
-                null
-            } ?: run {
-                server?.noteNullImage()
-                return@setOnImageAvailableListener
-            }
-            server?.noteImageAcquired()
-            try {
-                val now = System.currentTimeMillis()
-                val targetFps = prefs.getInt("target_fps", 15).coerceIn(5, 30)
-                if (now - lastEncodedAt < 1000L / targetFps) return@setOnImageAvailableListener
-                lastEncodedAt = now
-                // VirtualDisplay produces RGBA_8888 on this device.
-                val plane = image.planes[0]
-                val buffer = plane.buffer.duplicate()
-                val rowStride = plane.rowStride
-                val pixelStride = plane.pixelStride
-                val base = buffer.position()
-                val pixels = IntArray(width * height)
-                for (row in 0 until height) {
-                    val rowStart = base + row * rowStride
-                    for (col in 0 until width) {
-                        val offset = rowStart + col * pixelStride
-                        val r = buffer.get(offset).toInt() and 0xff
-                        val g = buffer.get(offset + 1).toInt() and 0xff
-                        val b = buffer.get(offset + 2).toInt() and 0xff
-                        val a = buffer.get(offset + 3).toInt() and 0xff
-                        pixels[row * width + col] = (a shl 24) or (r shl 16) or (g shl 8) or b
-                    }
-                }
-                val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-                try {
-                    bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
-                    val jpeg = ByteArrayOutputStream()
-                    val jpegQuality = prefs.getInt("jpeg_quality", 65).coerceIn(40, 85)
-                    if (bitmap.compress(Bitmap.CompressFormat.JPEG, jpegQuality, jpeg)) {
-                        server?.setFrame(jpeg.toByteArray())
-                    } else {
-                        server?.noteJpegFailure()
-                        Log.e(TAG, "Bitmap.compress returned false for ${width}x${height}")
-                    }
-                } finally {
-                    bitmap.recycle()
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Frame conversion failed", e)
-                server?.setFrameError(e.javaClass.simpleName + ": " + (e.message ?: "unknown"))
-            } finally {
-                image.close()
-            }
-        }, mainHandler)
+        captureWidth = width
+        captureHeight = height
+        captureDensityDpi = metrics.densityDpi
+        reader = createCaptureReader(width, height)
 
         projection = projectionManager.getMediaProjection(resultCode, data)
             ?: throw IllegalStateException("سیستم مجوز MediaProjection را برنگرداند")
@@ -255,6 +206,99 @@ class MainActivity : Activity() {
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader!!.surface, null, mainHandler
         ) ?: throw IllegalStateException("ساخت VirtualDisplay ناموفق بود")
         Log.i(TAG, "VirtualDisplay created")
+    }
+
+    private fun createCaptureReader(width: Int, height: Int): ImageReader {
+        return ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3).apply {
+            setOnImageAvailableListener({ imageReader ->
+                server?.noteImageCallback()
+                val image = try { imageReader.acquireLatestImage() } catch (e: Exception) {
+                    Log.w(TAG, "acquireLatestImage failed", e)
+                    server?.noteAcquireError(e.javaClass.simpleName + ": " + (e.message ?: "unknown"))
+                    null
+                } ?: run {
+                    server?.noteNullImage()
+                    return@setOnImageAvailableListener
+                }
+                server?.noteImageAcquired()
+                try {
+                    val now = System.currentTimeMillis()
+                    val targetFps = prefs.getInt("target_fps", 15).coerceIn(5, 30)
+                    if (now - lastEncodedAt < 1000L / targetFps) return@setOnImageAvailableListener
+                    lastEncodedAt = now
+                    val plane = image.planes[0]
+                    val buffer = plane.buffer.duplicate()
+                    val rowStride = plane.rowStride
+                    val pixelStride = plane.pixelStride
+                    val base = buffer.position()
+                    val pixels = IntArray(width * height)
+                    for (row in 0 until height) {
+                        val rowStart = base + row * rowStride
+                        for (col in 0 until width) {
+                            val offset = rowStart + col * pixelStride
+                            val r = buffer.get(offset).toInt() and 0xff
+                            val g = buffer.get(offset + 1).toInt() and 0xff
+                            val b = buffer.get(offset + 2).toInt() and 0xff
+                            val a = buffer.get(offset + 3).toInt() and 0xff
+                            pixels[row * width + col] = (a shl 24) or (r shl 16) or (g shl 8) or b
+                        }
+                    }
+                    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                    try {
+                        bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
+                        val jpeg = ByteArrayOutputStream()
+                        val jpegQuality = prefs.getInt("jpeg_quality", 65).coerceIn(40, 85)
+                        if (bitmap.compress(Bitmap.CompressFormat.JPEG, jpegQuality, jpeg)) {
+                            server?.setFrame(jpeg.toByteArray())
+                        } else {
+                            server?.noteJpegFailure()
+                            Log.e(TAG, "Bitmap.compress returned false for ${width}x${height}")
+                        }
+                    } finally {
+                        bitmap.recycle()
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Frame conversion failed", e)
+                    server?.setFrameError(e.javaClass.simpleName + ": " + (e.message ?: "unknown"))
+                } finally {
+                    image.close()
+                }
+            }, mainHandler)
+        }
+    }
+
+    private fun resizeCaptureForOrientation() {
+        if (!running.get() || projection == null || display == null) return
+        val metrics = DisplayMetrics()
+        @Suppress("DEPRECATION")
+        (getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.getRealMetrics(metrics)
+        if (metrics.widthPixels <= 0 || metrics.heightPixels <= 0) return
+        val maxWidth = prefs.getInt("max_width", 960).coerceIn(480, 2560)
+        val width = (metrics.widthPixels.coerceAtMost(maxWidth) / 2 * 2).coerceAtLeast(2)
+        val height = (metrics.heightPixels * width / metrics.widthPixels / 2 * 2).coerceAtLeast(2)
+        if (width == captureWidth && height == captureHeight) {
+            server?.setLandscape(metrics.widthPixels > metrics.heightPixels)
+            return
+        }
+        var newReader: ImageReader? = null
+        try {
+            newReader = createCaptureReader(width, height)
+            val oldReader = reader
+            display?.resize(width, height, metrics.densityDpi)
+            display?.setSurface(newReader.surface)
+            reader = newReader
+            captureWidth = width
+            captureHeight = height
+            captureDensityDpi = metrics.densityDpi
+            oldReader?.setOnImageAvailableListener(null, null)
+            oldReader?.close()
+            server?.setLandscape(metrics.widthPixels > metrics.heightPixels)
+            Log.i(TAG, "Resized capture surface to ${width}x${height}")
+        } catch (e: Exception) {
+            try { newReader?.close() } catch (_: Exception) {}
+            Log.e(TAG, "Could not resize capture after orientation change", e)
+            server?.setFrameError("orientation resize failed: " + (e.message ?: e.javaClass.simpleName))
+        }
     }
 
     private fun showSettings() {
@@ -317,6 +361,7 @@ class MainActivity : Activity() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         server?.setLandscape(newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE)
+        mainHandler.postDelayed({ resizeCaptureForOrientation() }, 300)
     }
 
     private fun showFailure(message: String) {
@@ -499,13 +544,11 @@ private class MjpegServer(
 <style>
 *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#080a0e;color:#fff;font:14px system-ui,sans-serif}
 main{position:relative;width:100vw;height:100dvh;display:flex;align-items:center;justify-content:center;background:#080a0e}
-#screen{display:block;max-width:100vw;max-height:100dvh;width:auto;height:auto;object-fit:contain}
-#stage.landscape #screen{width:100dvh;height:100vw;max-width:none;max-height:none;transform:rotate(90deg);transform-origin:center;object-fit:contain}
+#screen{display:block;width:100%;height:100%;max-width:100vw;max-height:100dvh;object-fit:contain;transform:none}
 #name{position:absolute;top:max(10px,env(safe-area-inset-top));left:max(10px,env(safe-area-inset-left));z-index:2;padding:5px 9px;border-radius:5px;background:#0009;color:#fff;font-size:clamp(11px,1.5vw,16px);max-width:65vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #credit{position:absolute;right:max(8px,env(safe-area-inset-right));bottom:max(7px,env(safe-area-inset-bottom));z-index:2;padding:3px 6px;border-radius:4px;background:#0008;color:#fff;font-size:10px;letter-spacing:.15px}
 #tools{position:absolute;right:10px;top:10px;z-index:3;opacity:.28;transition:opacity .2s}#tools:hover,#tools:focus-within{opacity:1}
 button{border:1px solid #ffffff55;border-radius:6px;background:#171a20;color:#fff;padding:7px 10px}
-.landscape #screen{width:100vw;height:100dvh;object-fit:contain}
 @media(orientation:landscape){main{width:100vw;height:100dvh}}
 </style></head><body><main id="stage"><div id="name">$safeName</div><div id="tools"><button id="fullscreen" type="button">تمام‌صفحه</button></div><img id="screen" src="/stream" alt="تصویر زندهٔ گوشی"><div id="credit">created by k1 shadnafar</div></main>
 <script>
