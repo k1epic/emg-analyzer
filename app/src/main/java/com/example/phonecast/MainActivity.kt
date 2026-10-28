@@ -471,8 +471,8 @@ private class MjpegServer(
                 out.write(bytes)
                 out.flush()
             } else if (line.contains("/stream")) {
-                if (!castingActive) { val body = "انتقال تصویر متوقف است. برای راه‌اندازی مجدد، دکمهٔ شروع انتقال تصویر را در برنامه بزنید."; val bytes = body.toByteArray(Charsets.UTF_8); out.write(("HTTP/1.1 503 Service Unavailable\\r\\nContent-Type: text/plain; charset=utf-8\\r\\nContent-Length: " + bytes.size + "\\r\\nConnection: close\\r\\n\\r\\n").toByteArray()); out.write(bytes); out.flush(); return }
-                if (!viewerActive.compareAndSet(false, true)) { val body = "این PhoneCast در حال حاضر توسط دستگاه دیگری استفاده می‌شود."; val bytes = body.toByteArray(Charsets.UTF_8); out.write(("HTTP/1.1 409 Conflict\\r\\nContent-Type: text/plain; charset=utf-8\\r\\nContent-Length: " + bytes.size + "\\r\\nConnection: close\\r\\n\\r\\n").toByteArray()); out.write(bytes); out.flush(); return }
+                if (!castingActive) { val body = "انتقال تصویر متوقف است. برای راه‌اندازی مجدد، دکمهٔ شروع انتقال تصویر را در برنامه بزنید."; val bytes = body.toByteArray(Charsets.UTF_8); out.write(("HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: " + bytes.size + "\r\nConnection: close\r\n\r\n").toByteArray()); out.write(bytes); out.flush(); return }
+                if (!viewerActive.compareAndSet(false, true)) { val body = "این PhoneCast در حال حاضر توسط دستگاه دیگری استفاده می‌شود."; val bytes = body.toByteArray(Charsets.UTF_8); out.write(("HTTP/1.1 409 Conflict\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: " + bytes.size + "\r\nConnection: close\r\n\r\n").toByteArray()); out.write(bytes); out.flush(); return }
                 lastViewerActivityAt = System.currentTimeMillis(); idleTimeoutNotified = false
                 try {
                 out.write(("HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=frame\r\nCache-Control: no-cache\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n").toByteArray())
