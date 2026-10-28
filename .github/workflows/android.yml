@@ -2,7 +2,7 @@ name: Build PhoneCast APK
 
 on:
   push:
-    branches: [ "main", "build-apk" ]
+    branches: [ "main", "build-apk", "phonecast-idle-orientation-resolution" ]
   workflow_dispatch:
 
 permissions:
