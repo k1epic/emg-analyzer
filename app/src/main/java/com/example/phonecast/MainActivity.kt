@@ -178,6 +178,7 @@ class MainActivity : Activity() {
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Frame conversion failed", e)
+                server?.setFrameError(e.javaClass.simpleName + ": " + (e.message ?: "unknown"))
             } finally {
                 image.close()
             }
@@ -288,8 +289,20 @@ private class MjpegServer(
     @Volatile private var latestFrame: ByteArray? = null
     @Volatile private var socketServer: ServerSocket? = null
     private val alive = AtomicBoolean(false)
+    @Volatile private var frameCount: Long = 0
+    @Volatile private var lastFrameBytes: Int = 0
+    @Volatile private var lastFrameAt: Long = 0
+    @Volatile private var lastFrameError: String = "No frame received yet"
 
-    fun setFrame(bytes: ByteArray) { latestFrame = bytes }
+    fun setFrameError(message: String) { lastFrameError = message.replace("\\", "/").replace("\r", " ").replace("\n", " ") }
+
+    fun setFrame(bytes: ByteArray) {
+        latestFrame = bytes
+        frameCount++
+        lastFrameBytes = bytes.size
+        lastFrameAt = System.currentTimeMillis()
+        lastFrameError = ""
+    }
 
     fun start() {
         if (!alive.compareAndSet(false, true)) return
@@ -318,7 +331,15 @@ private class MjpegServer(
             val count = input.read(request)
             val line = if (count > 0) String(request, 0, count, Charsets.US_ASCII).lineSequence().firstOrNull().orEmpty() else ""
             val out = client.getOutputStream()
-            if (line.contains("/stream")) {
+            if (line.startsWith("GET /status")) {
+                val age = if (lastFrameAt == 0L) -1L else System.currentTimeMillis() - lastFrameAt
+                val safeError = lastFrameError.replace("\\", "/").replace("\r", " ").replace("\n", " ").replace("\"", "'")
+                val body = "frames=" + frameCount + "\njpegBytes=" + lastFrameBytes + "\nlastFrameAgeMs=" + age + "\nerror=" + safeError + "\n"
+                val bytes = body.toByteArray(Charsets.UTF_8)
+                out.write(("HTTP/1.1 200 OK\\r\\nContent-Type: text/plain; charset=utf-8\\r\\nCache-Control: no-cache\\r\\nContent-Length: " + bytes.size + "\\r\\nConnection: close\\r\\n\\r\\n").toByteArray())
+                out.write(bytes)
+                out.flush()
+            } else if (line.contains("/stream")) {
                 out.write(("HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=frame\r\nCache-Control: no-cache\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n").toByteArray())
                 out.flush()
                 var lastFrame: ByteArray? = null
