@@ -5,9 +5,8 @@ import android.content.Context
 import android.content.BroadcastReceiver
 import android.content.IntentFilter
 import android.content.Intent
-import android.graphics.ImageFormat
-import android.graphics.Rect
-import android.graphics.YuvImage
+import android.graphics.Bitmap
+import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
@@ -145,7 +144,7 @@ class MainActivity : Activity() {
         val height = (metrics.heightPixels * width / metrics.widthPixels / 2 * 2).coerceAtLeast(2)
         Log.i(TAG, "Creating capture display: ${width}x${height}")
 
-        reader = ImageReader.newInstance(width, height, ImageFormat.YUV_420_888, 3)
+        reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
         reader!!.setOnImageAvailableListener({ imageReader ->
             server?.noteImageCallback()
             val image = try { imageReader.acquireLatestImage() } catch (e: Exception) {
@@ -158,33 +157,36 @@ class MainActivity : Activity() {
             }
             server?.noteImageAcquired()
             try {
-                val planes = image.planes
-                val nv21 = ByteArray(width * height * 3 / 2)
-                var out = 0
-                val yBuffer = planes[0].buffer.duplicate()
-                val yBase = yBuffer.position()
+                // VirtualDisplay produces RGBA_8888 on this device.
+                val plane = image.planes[0]
+                val buffer = plane.buffer.duplicate()
+                val rowStride = plane.rowStride
+                val pixelStride = plane.pixelStride
+                val base = buffer.position()
+                val pixels = IntArray(width * height)
                 for (row in 0 until height) {
+                    val rowStart = base + row * rowStride
                     for (col in 0 until width) {
-                        nv21[out++] = yBuffer.get(yBase + row * planes[0].rowStride + col * planes[0].pixelStride)
+                        val offset = rowStart + col * pixelStride
+                        val r = buffer.get(offset).toInt() and 0xff
+                        val g = buffer.get(offset + 1).toInt() and 0xff
+                        val b = buffer.get(offset + 2).toInt() and 0xff
+                        val a = buffer.get(offset + 3).toInt() and 0xff
+                        pixels[row * width + col] = (a shl 24) or (r shl 16) or (g shl 8) or b
                     }
                 }
-                val uBuffer = planes[1].buffer.duplicate()
-                val vBuffer = planes[2].buffer.duplicate()
-                val uBase = uBuffer.position()
-                val vBase = vBuffer.position()
-                for (row in 0 until height / 2) {
-                    for (col in 0 until width / 2) {
-                        nv21[out++] = vBuffer.get(vBase + row * planes[2].rowStride + col * planes[2].pixelStride)
-                        nv21[out++] = uBuffer.get(uBase + row * planes[1].rowStride + col * planes[1].pixelStride)
+                val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                try {
+                    bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
+                    val jpeg = ByteArrayOutputStream()
+                    if (bitmap.compress(Bitmap.CompressFormat.JPEG, 65, jpeg)) {
+                        server?.setFrame(jpeg.toByteArray())
+                    } else {
+                        server?.noteJpegFailure()
+                        Log.e(TAG, "Bitmap.compress returned false for ${width}x${height}")
                     }
-                }
-                val jpeg = ByteArrayOutputStream()
-                if (YuvImage(nv21, ImageFormat.NV21, width, height, null)
-                        .compressToJpeg(Rect(0, 0, width, height), 55, jpeg)) {
-                    server?.setFrame(jpeg.toByteArray())
-                } else {
-                    server?.noteJpegFailure()
-                    Log.e(TAG, "YuvImage.compressToJpeg returned false for ${width}x${height}")
+                } finally {
+                    bitmap.recycle()
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Frame conversion failed", e)
