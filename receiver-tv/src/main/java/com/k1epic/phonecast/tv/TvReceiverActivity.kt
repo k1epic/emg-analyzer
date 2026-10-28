@@ -48,6 +48,7 @@ class TvReceiverActivity : Activity() {
     @Volatile private var decoderWidth = 0
     @Volatile private var decoderHeight = 0
     @Volatile private var firstFrameRendered = false
+    @Volatile private var decoderNeedsConfigBuffer = false
 
     private lateinit var videoView: AspectRatioSurfaceView
     private lateinit var image: ImageView
@@ -190,8 +191,8 @@ class TvReceiverActivity : Activity() {
                         val payload = ByteArray(payloadSize)
                         input.readFully(payload)
                         if ((flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
-                            configureDecoder(width, height, force = true)
-                            queueDecoderInput(payload, pts, MediaCodec.BUFFER_FLAG_CODEC_CONFIG)
+                            configureDecoder(width, height, force = true, codecConfig = payload)
+                            if (decoderNeedsConfigBuffer) queueDecoderInput(payload, pts, MediaCodec.BUFFER_FLAG_CODEC_CONFIG)
                         } else {
                             if (decoder == null || width != decoderWidth || height != decoderHeight) {
                                 throw IllegalStateException("فریم ویدئو پیش از پیکربندی H.264 دریافت شد.")
@@ -262,7 +263,7 @@ class TvReceiverActivity : Activity() {
         if (connected.get()) throw IllegalStateException("جریان MJPEG قطع شد.")
     }
 
-    private fun configureDecoder(width: Int, height: Int, force: Boolean) {
+    private fun configureDecoder(width: Int, height: Int, force: Boolean, codecConfig: ByteArray? = null) {
         synchronized(decoderLock) {
             if (!force && decoder != null && decoderWidth == width && decoderHeight == height) return
             releaseDecoderLocked()
@@ -278,6 +279,13 @@ class TvReceiverActivity : Activity() {
 
             var codec = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
             val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
+            var hasCsdInFormat = false
+            val csd = codecConfig?.let { splitAvcConfig(it) }
+            if (csd != null) {
+                format.setByteBuffer("csd-0", java.nio.ByteBuffer.wrap(csd.first))
+                format.setByteBuffer("csd-1", java.nio.ByteBuffer.wrap(csd.second))
+                hasCsdInFormat = true
+            }
             if (Build.VERSION.SDK_INT >= 30) {
                 try { format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1) } catch (_: Exception) {}
             }
@@ -289,6 +297,7 @@ class TvReceiverActivity : Activity() {
                 val compatibleFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
                 try {
                     codec.configure(compatibleFormat, surface, null, 0)
+                    hasCsdInFormat = false
                 } catch (second: Exception) {
                     try { codec.release() } catch (_: Exception) {}
                     throw IllegalStateException("راه‌اندازی رمزگشای H.264 ناموفق بود: ${second.message ?: first.message}", second)
@@ -303,6 +312,7 @@ class TvReceiverActivity : Activity() {
             decoder = codec
             decoderWidth = width
             decoderHeight = height
+            decoderNeedsConfigBuffer = !hasCsdInFormat
             videoView.setVideoSize(width, height)
             decoderOutputThread = Thread({ drainDecoderOutput(codec) }, "PhoneCastAvcRender").apply {
                 isDaemon = true
@@ -313,6 +323,36 @@ class TvReceiverActivity : Activity() {
                 image.visibility = View.GONE
             }
         }
+    }
+
+    /** Split Annex-B AVC config into the separate SPS/PPS buffers preferred by Android decoders. */
+    private fun splitAvcConfig(data: ByteArray): Pair<ByteArray, ByteArray>? {
+        fun prefixAt(i: Int): Int {
+            if (i + 3 < data.size && data[i] == 0.toByte() && data[i + 1] == 0.toByte() &&
+                data[i + 2] == 0.toByte() && data[i + 3] == 1.toByte()) return 4
+            if (i + 2 < data.size && data[i] == 0.toByte() &&
+                data[i + 1] == 0.toByte() && data[i + 2] == 1.toByte()) return 3
+            return 0
+        }
+        val starts = ArrayList<Pair<Int, Int>>()
+        var i = 0
+        while (i < data.size - 3) {
+            val prefix = prefixAt(i)
+            if (prefix > 0) { starts.add(i to prefix); i += prefix } else i++
+        }
+        var sps: ByteArray? = null
+        var pps: ByteArray? = null
+        for (n in starts.indices) {
+            val start = starts[n].first
+            val nalStart = start + starts[n].second
+            val nalEnd = if (n + 1 < starts.size) starts[n + 1].first else data.size
+            if (nalStart >= nalEnd) continue
+            when (data[nalStart].toInt() and 0x1f) {
+                7 -> sps = data.copyOfRange(start, nalEnd)
+                8 -> pps = data.copyOfRange(start, nalEnd)
+            }
+        }
+        return if (sps != null && pps != null) sps to pps else null
     }
 
     private fun queueDecoderInput(payload: ByteArray, pts: Long, flags: Int) {
@@ -372,6 +412,7 @@ class TvReceiverActivity : Activity() {
         decoder = null
         decoderWidth = 0
         decoderHeight = 0
+        decoderNeedsConfigBuffer = false
         try { decoderOutputThread?.interrupt() } catch (_: Exception) {}
         decoderOutputThread = null
         if (old != null) {
