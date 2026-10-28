@@ -18,6 +18,10 @@ import android.util.DisplayMetrics
 import android.util.Log
 import android.view.WindowManager
 import android.widget.Button
+import android.widget.EditText
+import android.widget.ScrollView
+import android.text.InputType
+import android.app.AlertDialog
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -33,6 +37,8 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var address: TextView
     private lateinit var projectionManager: MediaProjectionManager
+    private val prefs by lazy { getSharedPreferences("phonecast_settings", Context.MODE_PRIVATE) }
+    @Volatile private var lastEncodedAt = 0L
     private var projection: MediaProjection? = null
     private var display: VirtualDisplay? = null
     private var reader: ImageReader? = null
@@ -95,6 +101,7 @@ class MainActivity : Activity() {
                 }
             }
         })
+        layout.addView(Button(this).apply { text = "تنظیمات"; setOnClickListener { showSettings() } })
         layout.addView(Button(this).apply { text = "توقف انتقال"; setOnClickListener { stopCasting() } })
         setContentView(layout)
     }
@@ -140,7 +147,8 @@ class MainActivity : Activity() {
         if (metrics.widthPixels <= 0 || metrics.heightPixels <= 0) {
             throw IllegalStateException("ابعاد صفحه قابل تشخیص نیست")
         }
-        val width = (metrics.widthPixels.coerceAtMost(960) / 2 * 2).coerceAtLeast(2)
+        val maxWidth = prefs.getInt("max_width", 960).coerceIn(480, 960)
+        val width = (metrics.widthPixels.coerceAtMost(maxWidth) / 2 * 2).coerceAtLeast(2)
         val height = (metrics.heightPixels * width / metrics.widthPixels / 2 * 2).coerceAtLeast(2)
         Log.i(TAG, "Creating capture display: ${width}x${height}")
 
@@ -157,6 +165,10 @@ class MainActivity : Activity() {
             }
             server?.noteImageAcquired()
             try {
+                val now = System.currentTimeMillis()
+                val targetFps = prefs.getInt("target_fps", 15).coerceIn(5, 30)
+                if (now - lastEncodedAt < 1000L / targetFps) return@setOnImageAvailableListener
+                lastEncodedAt = now
                 // VirtualDisplay produces RGBA_8888 on this device.
                 val plane = image.planes[0]
                 val buffer = plane.buffer.duplicate()
@@ -179,7 +191,8 @@ class MainActivity : Activity() {
                 try {
                     bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
                     val jpeg = ByteArrayOutputStream()
-                    if (bitmap.compress(Bitmap.CompressFormat.JPEG, 65, jpeg)) {
+                    val jpegQuality = prefs.getInt("jpeg_quality", 65).coerceIn(40, 85)
+                    if (bitmap.compress(Bitmap.CompressFormat.JPEG, jpegQuality, jpeg)) {
                         server?.setFrame(jpeg.toByteArray())
                     } else {
                         server?.noteJpegFailure()
@@ -211,13 +224,17 @@ class MainActivity : Activity() {
             }
         }, mainHandler)
 
+        val serverPort = prefs.getInt("server_port", 8080).coerceIn(1024, 65535)
+        val displayName = prefs.getString("display_name", "PhoneCast")?.take(40) ?: "PhoneCast"
         val newServer = MjpegServer(
+            port = serverPort,
+            displayName = displayName,
             onReady = {
                 mainHandler.post {
                     if (projection != null && display != null) {
                         running.set(true)
                         status.text = "انتقال تصویر فعال است. گوشی و تلویزیون باید روی یک شبکهٔ Wi-Fi باشند."
-                        address.text = "در مرورگر Android Box باز کنید:\nhttp://${localIp()}:8080"
+                        address.text = "در مرورگر Android Box باز کنید:\nhttp://${localIp()}:$serverPort"
                     }
                 }
             },
@@ -234,6 +251,47 @@ class MainActivity : Activity() {
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader!!.surface, null, mainHandler
         ) ?: throw IllegalStateException("ساخت VirtualDisplay ناموفق بود")
         Log.i(TAG, "VirtualDisplay created")
+    }
+
+    private fun showSettings() {
+        val panel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(28, 8, 28, 8) }
+        fun field(label: String, value: String, numeric: Boolean = false): EditText {
+            panel.addView(TextView(this).apply { text = label; textSize = 14f; setPadding(0, 10, 0, 2) })
+            return EditText(this).apply {
+                setSingleLine(true); setText(value)
+                if (numeric) inputType = InputType.TYPE_CLASS_NUMBER
+                panel.addView(this)
+            }
+        }
+        val nameField = field("نام نمایشی روی تصویر وب", prefs.getString("display_name", "PhoneCast") ?: "PhoneCast")
+        val ipField = field("IP برای نمایش آدرس (خالی = خودکار)", prefs.getString("advertised_ip", "") ?: "")
+        val portField = field("Port (1024 تا 65535)", prefs.getInt("server_port", 8080).toString(), true)
+        val fpsField = field("نرخ فریم هدف (5 تا 30)", prefs.getInt("target_fps", 15).toString(), true)
+        val widthField = field("حداکثر عرض تصویر (480 / 640 / 960)", prefs.getInt("max_width", 960).toString(), true)
+        val qualityField = field("کیفیت JPEG (40 تا 85)", prefs.getInt("jpeg_quality", 65).toString(), true)
+        panel.addView(TextView(this).apply {
+            text = "IP گوشی به‌صورت خودکار از شبکهٔ Wi-Fi تشخیص داده می‌شود؛ برای تغییر IP باید تنظیمات شبکهٔ گوشی/روتر را تغییر دهید."
+            textSize = 12f; setPadding(0, 12, 0, 0)
+        })
+        AlertDialog.Builder(this).setTitle("تنظیمات PhoneCast").setView(ScrollView(this).apply { addView(panel) })
+            .setNegativeButton("انصراف", null)
+            .setPositiveButton("ذخیره") { _, _ ->
+                val port = portField.text.toString().toIntOrNull()
+                val fps = fpsField.text.toString().toIntOrNull()
+                val width = widthField.text.toString().toIntOrNull()
+                val quality = qualityField.text.toString().toIntOrNull()
+                if (port == null || port !in 1024..65535 || fps == null || fps !in 5..30 ||
+                    width == null || width !in listOf(480, 640, 960) || quality == null || quality !in 40..85) {
+                    Toast.makeText(this, "مقادیر نامعتبر است؛ پورت 1024–65535، FPS برابر 5–30، عرض 480/640/960 و کیفیت 40–85 باشد.", Toast.LENGTH_LONG).show()
+                    return@setPositiveButton
+                }
+                prefs.edit().putString("display_name", nameField.text.toString().trim().ifBlank { "PhoneCast" }.take(40))
+                    .putString("advertised_ip", ipField.text.toString().trim())
+                    .putInt("server_port", port).putInt("target_fps", fps).putInt("max_width", width)
+                    .putInt("jpeg_quality", quality).apply()
+                Toast.makeText(this, "تنظیمات ذخیره شد. برای اعمال پورت جدید، انتقال را متوقف و دوباره شروع کنید.", Toast.LENGTH_LONG).show()
+                if (::address.isInitialized) address.text = "آدرس گیرنده: http://${displayIp()}:$port"
+            }.show()
     }
 
     private fun showFailure(message: String) {
@@ -266,6 +324,8 @@ class MainActivity : Activity() {
         server = null
     }
 
+    private fun displayIp(): String = prefs.getString("advertised_ip", "")?.trim()?.takeIf { it.isNotEmpty() } ?: localIp()
+
     private fun localIp(): String {
         try {
             val interfaces = Collections.list(NetworkInterface.getNetworkInterfaces())
@@ -295,6 +355,8 @@ class MainActivity : Activity() {
 }
 
 private class MjpegServer(
+    private val port: Int,
+    private val displayName: String,
     private val onReady: () -> Unit,
     private val onError: (Exception) -> Unit
 ) {
@@ -335,9 +397,9 @@ private class MjpegServer(
         if (!alive.compareAndSet(false, true)) return
         Thread({
             try {
-                val ss = ServerSocket(8080)
+                val ss = ServerSocket(port)
                 socketServer = ss
-                Log.i("PhoneCast", "HTTP server listening on 8080")
+                Log.i("PhoneCast", "HTTP server listening on $port")
                 onReady()
                 while (alive.get()) {
                     val client = ss.accept()
@@ -384,7 +446,27 @@ private class MjpegServer(
                     Thread.sleep(40)
                 }
             } else {
-                val html = """<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Phone Cast</title><style>html,body{margin:0;background:#111;color:#fff;font:16px sans-serif;height:100%;display:grid;place-items:center}main{width:100%;text-align:center}img{width:100%;height:auto;max-height:90vh;object-fit:contain}p{padding:8px}</style></head><body><main><p>Phone Cast — گیرندهٔ وب</p><img src="/stream" alt="Live phone screen"></main></body></html>"""
+                val safeName = displayName.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&#39;")
+                val html = """<!doctype html>
+<html lang="fa"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover"><title>PhoneCast</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#080a0e;color:#fff;font:14px system-ui,sans-serif}
+main{position:relative;width:100vw;height:100dvh;display:flex;align-items:center;justify-content:center;background:#080a0e}
+#screen{display:block;max-width:100vw;max-height:100dvh;width:auto;height:auto;object-fit:contain}
+#name{position:absolute;top:max(10px,env(safe-area-inset-top));left:max(10px,env(safe-area-inset-left));z-index:2;padding:5px 9px;border-radius:5px;background:#0009;color:#fff;font-size:clamp(11px,1.5vw,16px);max-width:65vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#credit{position:absolute;right:max(8px,env(safe-area-inset-right));bottom:max(7px,env(safe-area-inset-bottom));z-index:2;padding:3px 6px;border-radius:4px;background:#0008;color:#fff;font-size:10px;letter-spacing:.15px}
+#tools{position:absolute;right:10px;top:10px;z-index:3;opacity:.28;transition:opacity .2s}#tools:hover,#tools:focus-within{opacity:1}
+button{border:1px solid #ffffff55;border-radius:6px;background:#171a20;color:#fff;padding:7px 10px}
+.landscape #screen{width:100vw;height:100dvh;object-fit:contain}
+@media(orientation:landscape){main{width:100vw;height:100dvh}}
+</style></head><body><main id="stage"><div id="name">$safeName</div><div id="tools"><button id="fullscreen" type="button">تمام‌صفحه</button></div><img id="screen" src="/stream" alt="تصویر زندهٔ گوشی"><div id="credit">created by k1 shadnafar</div></main>
+<script>
+(()=>{const stage=document.getElementById('stage'),img=document.getElementById('screen'),btn=document.getElementById('fullscreen');
+const detect=()=>{if(img.naturalWidth&&img.naturalHeight){stage.classList.toggle('landscape',img.naturalWidth>img.naturalHeight);stage.classList.toggle('portrait',img.naturalHeight>=img.naturalWidth)}};
+setInterval(detect,500);img.addEventListener('load',detect);
+btn.addEventListener('click',()=>{if(!document.fullscreenElement){stage.requestFullscreen?.().catch(()=>{})}else{document.exitFullscreen?.()}});
+})();
+</script></body></html>"""
                 val bytes = html.toByteArray(Charsets.UTF_8)
                 out.write(("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n").toByteArray())
                 out.write(bytes)
