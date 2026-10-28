@@ -1,4 +1,4 @@
-name: Build PhoneCast APK
+name: Build PhoneCast APKs
 
 on:
   push:
@@ -25,19 +25,27 @@ jobs:
           cmdline-tools-version: 12266719
           accept-android-sdk-licenses: true
           packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
-      - name: Build debug APK
-        run: gradle --no-daemon assembleDebug
-      - name: Verify APK signature and package metadata
+      - name: Build both APKs
+        run: gradle --no-daemon :app:assembleDebug :receiver-tv:assembleDebug
+      - name: Verify APKs
         run: |
-          APK="app/build/outputs/apk/debug/app-debug.apk"
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$APK"
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" | head -n 3
-          sha256sum "$APK"
-          unzip -t "$APK" | tail -n 2
-      - name: Upload APK
+          for APK in app/build/outputs/apk/debug/app-debug.apk receiver-tv/build/outputs/apk/debug/receiver-tv-debug.apk; do
+            "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose "$APK"
+            "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" | head -n 3
+            sha256sum "$APK"
+            unzip -t "$APK" | tail -n 2
+          done
+      - name: Upload PhoneCast sender APK
         uses: actions/upload-artifact@v4
         with:
-          name: phonecast-debug-apk
+          name: phonecast-sender-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload Android TV receiver APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: phonecast-tv-receiver-debug-apk
+          path: receiver-tv/build/outputs/apk/debug/receiver-tv-debug.apk
           if-no-files-found: error
           retention-days: 14
