@@ -2,6 +2,8 @@ package com.k1epic.phonecast
 
 import android.app.Activity
 import android.content.Context
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
 import android.content.Intent
 import android.graphics.ImageFormat
 import android.graphics.Rect
@@ -38,11 +40,33 @@ class MainActivity : Activity() {
     private var server: MjpegServer? = null
     private val running = AtomicBoolean(false)
     private val requestCapture = 1001
+    private var pendingCaptureResultCode: Int? = null
+    private var pendingCaptureData: Intent? = null
+    private var receiverRegistered = false
+    private val projectionServiceReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != ProjectionForegroundService.ACTION_READY) return
+            val resultCode = pendingCaptureResultCode
+            val data = pendingCaptureData
+            pendingCaptureResultCode = null
+            pendingCaptureData = null
+            if (resultCode != null && data != null && !running.get()) {
+                try {
+                    startCasting(resultCode, data)
+                } catch (e: Exception) {
+                    Log.e(TAG, "startCasting failed after foreground service startup", e)
+                    showFailure("شروع انتقال ناموفق بود: ${e.message ?: e.javaClass.simpleName}")
+                }
+            }
+        }
+    }
     private val mainHandler by lazy { Handler(mainLooper) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        registerReceiver(projectionServiceReceiver, IntentFilter(ProjectionForegroundService.ACTION_READY))
+        receiverRegistered = true
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(36, 48, 36, 36)
@@ -85,11 +109,24 @@ class MainActivity : Activity() {
             showFailure("مجوز ضبط صفحه تأیید نشد. دوباره شروع را بزنید و «شروع اکنون» را انتخاب کنید.")
             return
         }
+        // Android requires a foreground service of type mediaProjection before
+        // MediaProjection.getMediaProjection() is called.
+        pendingCaptureResultCode = resultCode
+        pendingCaptureData = data
         try {
-            startCasting(resultCode, data)
+            val serviceIntent = Intent(this, ProjectionForegroundService::class.java)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
+            status.text = "در حال آماده‌سازی سرویس ضبط صفحه…"
+            address.text = "لطفاً چند لحظه صبر کنید."
         } catch (e: Exception) {
-            Log.e(TAG, "startCasting failed", e)
-            showFailure("شروع انتقال ناموفق بود: ${e.message ?: e.javaClass.simpleName}")
+            pendingCaptureResultCode = null
+            pendingCaptureData = null
+            Log.e(TAG, "Could not start projection foreground service", e)
+            showFailure("راه‌اندازی سرویس ضبط صفحه ناموفق بود: ${e.message ?: e.javaClass.simpleName}")
         }
     }
 
@@ -195,7 +232,10 @@ class MainActivity : Activity() {
     }
 
     private fun stopCasting() {
+        pendingCaptureResultCode = null
+        pendingCaptureData = null
         releaseResources(stopProjection = true)
+        try { stopService(Intent(this, ProjectionForegroundService::class.java)) } catch (e: Exception) { Log.w(TAG, "service stop", e) }
         if (::status.isInitialized) status.text = "انتقال متوقف است."
         if (::address.isInitialized) address.text = "برای شروع دوباره، دکمهٔ شروع انتقال تصویر را بزنید."
     }
@@ -230,6 +270,11 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         releaseResources(stopProjection = true)
+        try { stopService(Intent(this, ProjectionForegroundService::class.java)) } catch (e: Exception) { Log.w(TAG, "service stop on destroy", e) }
+        if (receiverRegistered) {
+            try { unregisterReceiver(projectionServiceReceiver) } catch (e: Exception) { Log.w(TAG, "receiver unregister", e) }
+            receiverRegistered = false
+        }
         super.onDestroy()
     }
 
