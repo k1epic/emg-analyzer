@@ -149,8 +149,13 @@ class MainActivity : Activity() {
         reader!!.setOnImageAvailableListener({ imageReader ->
             server?.noteImageCallback()
             val image = try { imageReader.acquireLatestImage() } catch (e: Exception) {
-                Log.w(TAG, "acquireLatestImage failed", e); null
-            } ?: return@setOnImageAvailableListener
+                Log.w(TAG, "acquireLatestImage failed", e)
+                server?.noteAcquireError(e.javaClass.simpleName + ": " + (e.message ?: "unknown"))
+                null
+            } ?: run {
+                server?.noteNullImage()
+                return@setOnImageAvailableListener
+            }
             server?.noteImageAcquired()
             try {
                 val planes = image.planes
@@ -297,6 +302,9 @@ private class MjpegServer(
     @Volatile private var imageCallbacks: Long = 0
     @Volatile private var acquiredImages: Long = 0
     @Volatile private var jpegFailures: Long = 0
+    @Volatile private var nullImages: Long = 0
+    @Volatile private var acquireErrors: Long = 0
+    @Volatile private var lastAcquireError: String = ""
     @Volatile private var frameCount: Long = 0
     @Volatile private var lastFrameBytes: Int = 0
     @Volatile private var lastFrameAt: Long = 0
@@ -305,6 +313,11 @@ private class MjpegServer(
     fun noteImageCallback() { imageCallbacks++ }
     fun noteImageAcquired() { acquiredImages++ }
     fun noteJpegFailure() { jpegFailures++ }
+    fun noteNullImage() { nullImages++ }
+    fun noteAcquireError(message: String) {
+        acquireErrors++
+        lastAcquireError = message.replace("\\", "/").replace("\r", " ").replace("\n", " ")
+    }
 
     fun setFrameError(message: String) { lastFrameError = message.replace("\\", "/").replace("\r", " ").replace("\n", " ") }
 
@@ -346,7 +359,7 @@ private class MjpegServer(
             if (line.startsWith("GET /status")) {
                 val age = if (lastFrameAt == 0L) -1L else System.currentTimeMillis() - lastFrameAt
                 val safeError = lastFrameError.replace("\\", "/").replace("\r", " ").replace("\n", " ").replace("\"", "'")
-                val body = "callbacks=" + imageCallbacks + "\nimagesAcquired=" + acquiredImages + "\njpegFailures=" + jpegFailures + "\nframes=" + frameCount + "\njpegBytes=" + lastFrameBytes + "\nlastFrameAgeMs=" + age + "\nerror=" + safeError + "\n"
+                val body = "callbacks=" + imageCallbacks + "\nimagesAcquired=" + acquiredImages + "\nnullImages=" + nullImages + "\nacquireErrors=" + acquireErrors + "\nlastAcquireError=" + lastAcquireError + "\njpegFailures=" + jpegFailures + "\nframes=" + frameCount + "\njpegBytes=" + lastFrameBytes + "\nlastFrameAgeMs=" + age + "\nerror=" + safeError + "\n"
                 val bytes = body.toByteArray(Charsets.UTF_8)
                 out.write(("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-cache\r\nContent-Length: " + bytes.size + "\r\nConnection: close\r\n\r\n").toByteArray())
                 out.write(bytes)
