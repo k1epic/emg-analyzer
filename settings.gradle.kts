@@ -13,4 +13,4 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "PhoneCast"
-include(":app")
+include(":app", ":receiver-tv")
