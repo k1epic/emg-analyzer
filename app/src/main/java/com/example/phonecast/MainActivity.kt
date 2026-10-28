@@ -510,8 +510,7 @@ button{border:1px solid #ffffff55;border-radius:6px;background:#171a20;color:#ff
 </style></head><body><main id="stage"><div id="name">$safeName</div><div id="tools"><button id="fullscreen" type="button">تمام‌صفحه</button></div><img id="screen" src="/stream" alt="تصویر زندهٔ گوشی"><div id="credit">created by k1 shadnafar</div></main>
 <script>
 (()=>{const stage=document.getElementById('stage'),img=document.getElementById('screen'),btn=document.getElementById('fullscreen');
-const detect=()=>{if(img.naturalWidth&&img.naturalHeight){stage.classList.toggle('landscape',img.naturalWidth>img.naturalHeight);stage.classList.toggle('portrait',img.naturalHeight>=img.naturalWidth)}};
-setInterval(detect,500);img.addEventListener('load',detect);
+const detect=()=>{};
 const pollStatus=async()=>{try{const r=await fetch('/status?t='+Date.now(),{cache:'no-store'});const t=await r.text();const v=Object.fromEntries(t.trim().split(String.fromCharCode(10)).map(x=>x.split('=')).filter(x=>x.length===2));stage.classList.toggle('landscape',v.landscape==='true');let notice=document.getElementById('notice');if(!notice){notice=document.createElement('div');notice.id='notice';notice.style.cssText='position:absolute;inset:0;z-index:4;display:none;align-items:center;justify-content:center;text-align:center;padding:24px;background:#080a0e;color:#fff;font-size:clamp(16px,2.4vw,24px);line-height:1.8';stage.appendChild(notice)}if(v.casting!=='true'){notice.style.display='flex';notice.textContent='انتقال تصویر متوقف است. برای راه‌اندازی مجدد، در برنامهٔ PhoneCast دکمهٔ «شروع انتقال تصویر» را بزنید.';img.style.visibility='hidden'}else{notice.style.display='none';img.style.visibility='visible'}}catch(e){}};
 pollStatus();setInterval(pollStatus,2000);
 btn.addEventListener('click',()=>{if(!document.fullscreenElement){stage.requestFullscreen?.().catch(()=>{})}else{document.exitFullscreen?.()}});
