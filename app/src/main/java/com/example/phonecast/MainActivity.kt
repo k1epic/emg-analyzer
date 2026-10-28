@@ -147,9 +147,11 @@ class MainActivity : Activity() {
 
         reader = ImageReader.newInstance(width, height, ImageFormat.YUV_420_888, 3)
         reader!!.setOnImageAvailableListener({ imageReader ->
+            server?.noteImageCallback()
             val image = try { imageReader.acquireLatestImage() } catch (e: Exception) {
                 Log.w(TAG, "acquireLatestImage failed", e); null
             } ?: return@setOnImageAvailableListener
+            server?.noteImageAcquired()
             try {
                 val planes = image.planes
                 val nv21 = ByteArray(width * height * 3 / 2)
@@ -175,6 +177,9 @@ class MainActivity : Activity() {
                 if (YuvImage(nv21, ImageFormat.NV21, width, height, null)
                         .compressToJpeg(Rect(0, 0, width, height), 55, jpeg)) {
                     server?.setFrame(jpeg.toByteArray())
+                } else {
+                    server?.noteJpegFailure()
+                    Log.e(TAG, "YuvImage.compressToJpeg returned false for ${width}x${height}")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Frame conversion failed", e)
@@ -289,10 +294,17 @@ private class MjpegServer(
     @Volatile private var latestFrame: ByteArray? = null
     @Volatile private var socketServer: ServerSocket? = null
     private val alive = AtomicBoolean(false)
+    @Volatile private var imageCallbacks: Long = 0
+    @Volatile private var acquiredImages: Long = 0
+    @Volatile private var jpegFailures: Long = 0
     @Volatile private var frameCount: Long = 0
     @Volatile private var lastFrameBytes: Int = 0
     @Volatile private var lastFrameAt: Long = 0
     @Volatile private var lastFrameError: String = "No frame received yet"
+
+    fun noteImageCallback() { imageCallbacks++ }
+    fun noteImageAcquired() { acquiredImages++ }
+    fun noteJpegFailure() { jpegFailures++ }
 
     fun setFrameError(message: String) { lastFrameError = message.replace("\\", "/").replace("\r", " ").replace("\n", " ") }
 
@@ -334,7 +346,7 @@ private class MjpegServer(
             if (line.startsWith("GET /status")) {
                 val age = if (lastFrameAt == 0L) -1L else System.currentTimeMillis() - lastFrameAt
                 val safeError = lastFrameError.replace("\\", "/").replace("\r", " ").replace("\n", " ").replace("\"", "'")
-                val body = "frames=" + frameCount + "\njpegBytes=" + lastFrameBytes + "\nlastFrameAgeMs=" + age + "\nerror=" + safeError + "\n"
+                val body = "callbacks=" + imageCallbacks + "\nimagesAcquired=" + acquiredImages + "\njpegFailures=" + jpegFailures + "\nframes=" + frameCount + "\njpegBytes=" + lastFrameBytes + "\nlastFrameAgeMs=" + age + "\nerror=" + safeError + "\n"
                 val bytes = body.toByteArray(Charsets.UTF_8)
                 out.write(("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-cache\r\nContent-Length: " + bytes.size + "\r\nConnection: close\r\n\r\n").toByteArray())
                 out.write(bytes)
