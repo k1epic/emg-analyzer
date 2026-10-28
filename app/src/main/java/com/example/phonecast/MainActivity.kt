@@ -33,6 +33,7 @@ import java.net.NetworkInterface
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicBoolean
 
+// Configurable frame pacing, JPEG quality, resolution and receiver metadata.
 class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var address: TextView
