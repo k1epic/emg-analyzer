@@ -264,6 +264,7 @@ class MainActivity : Activity() {
             }
         }
         val nameField = field("نام نمایشی روی تصویر وب", prefs.getString("display_name", "PhoneCast") ?: "PhoneCast")
+        val ipField = field("IP برای نمایش آدرس (خالی = خودکار)", prefs.getString("advertised_ip", "") ?: "")
         val portField = field("Port (1024 تا 65535)", prefs.getInt("server_port", 8080).toString(), true)
         val fpsField = field("نرخ فریم هدف (5 تا 30)", prefs.getInt("target_fps", 15).toString(), true)
         val widthField = field("حداکثر عرض تصویر (480 / 640 / 960)", prefs.getInt("max_width", 960).toString(), true)
@@ -285,10 +286,11 @@ class MainActivity : Activity() {
                     return@setPositiveButton
                 }
                 prefs.edit().putString("display_name", nameField.text.toString().trim().ifBlank { "PhoneCast" }.take(40))
+                    .putString("advertised_ip", ipField.text.toString().trim())
                     .putInt("server_port", port).putInt("target_fps", fps).putInt("max_width", width)
                     .putInt("jpeg_quality", quality).apply()
                 Toast.makeText(this, "تنظیمات ذخیره شد. برای اعمال پورت جدید، انتقال را متوقف و دوباره شروع کنید.", Toast.LENGTH_LONG).show()
-                if (::address.isInitialized) address.text = "آدرس گیرنده: http://${localIp()}:$port"
+                if (::address.isInitialized) address.text = "آدرس گیرنده: http://${displayIp()}:$port"
             }.show()
     }
 
@@ -321,6 +323,8 @@ class MainActivity : Activity() {
         try { server?.close() } catch (e: Exception) { Log.w(TAG, "server close", e) }
         server = null
     }
+
+    private fun displayIp(): String = prefs.getString("advertised_ip", "")?.trim()?.takeIf { it.isNotEmpty() } ?: localIp()
 
     private fun localIp(): String {
         try {
